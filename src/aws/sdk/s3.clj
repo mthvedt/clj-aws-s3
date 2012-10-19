@@ -1,41 +1,51 @@
 (ns aws.sdk.s3
   "Functions to access the Amazon S3 storage service.
 
-  Each function takes a map of credentials as its first argument. The
-  credentials map should contain an :access-key key and a :secret-key key."
-  (:import com.amazonaws.auth.BasicAWSCredentials
-           com.amazonaws.services.s3.AmazonS3Client
-           com.amazonaws.AmazonServiceException
-           com.amazonaws.services.s3.model.AccessControlList
-           com.amazonaws.services.s3.model.Bucket
-           com.amazonaws.services.s3.model.Grant
-           com.amazonaws.services.s3.model.CanonicalGrantee
-           com.amazonaws.services.s3.model.EmailAddressGrantee
-           com.amazonaws.services.s3.model.GroupGrantee
-           com.amazonaws.services.s3.model.ListObjectsRequest
-           com.amazonaws.services.s3.model.Owner
-           com.amazonaws.services.s3.model.ObjectMetadata
-           com.amazonaws.services.s3.model.ObjectListing
-           com.amazonaws.services.s3.model.Permission
-           com.amazonaws.services.s3.model.PutObjectRequest
-           com.amazonaws.services.s3.model.S3Object
-           com.amazonaws.services.s3.model.S3ObjectSummary
-           java.io.ByteArrayInputStream
-           java.io.File
-           java.io.InputStream
-           java.nio.charset.Charset))
+  The fundemental abstraction is an environmental set of credentials
+  and an environmental bucket name. These are *cred* and *bucket-name*
+  respectively. *cred* should be a map with :access-key and :secret-key,
+  or a BasicAWSCredentials object.
+  bucket-name should be a String bucket name.
+  Operations are assumed to be done within the given bucket."
+
+  (:import
+    [com.amazonaws AmazonServiceException]
+    [com.amazonaws.auth AWScredentials BasicAWScredentials]
+    [com.amazonaws.services.s3 AmazonS3Client]
+    [com.amazonaws.services.s3.model 
+     AccessControlList Bucket Grant CanonicalGrantee
+     EmailAddressGrantee GroupGrantee ListObjectsRequest Owner
+     ObjectMetadata ObjectListing Permission PutObjectRequest
+     S3Object S3ObjectSummary]
+    [java.io ByteArrayInputStream File InputStream]
+    [java.nio.charset Charset]))
+
+; TODO: remove map thing
+(def ^{:dynamic true
+       :doc "The current AWS crednetials. Must be bound.
+            Can be an AWScredentials, or a map with :access-key and :secret-key."}
+  *cred* nil)
+
+(def *bucket-name* nil)
 
 (defn- s3-client*
   "Create an AmazonS3Client instance from a map of credentials."
   [cred]
-  (AmazonS3Client.
-   (BasicAWSCredentials.
-    (:access-key cred)
-    (:secret-key cred))))
+  (if cred
+    (if (instance? AWScredentials cred)
+      cred
+      (AmazonS3Client.
+        (BasicAWScredentials.
+          (:access-key cred)
+          (:secret-key cred))))
+    (throw (NullPointerException. "cred"))))
 
 (def ^{:private true}
-  s3-client
+  s3-client*m
   (memoize s3-client*))
+
+(defn- s3-client
+  (s3-client*m *cred*))
 
 (defprotocol ^{:no-doc true} Mappable
   "Convert a value into a Clojure map."
@@ -55,28 +65,28 @@
   (to-map [_] nil))
 
 (defn bucket-exists?
-  "Returns true if the supplied bucket name already exists in S3."
-  [cred name]
-  (.doesBucketExist (s3-client cred) name))
+  "Returns true if *bucket-name* already exists in S3."
+  []
+  (.doesBucketExist (s3-client) *bucket-name*))
 
 (defn create-bucket
-  "Create a new S3 bucket with the supplied name."
-  [cred name]
-  (to-map (.createBucket (s3-client cred) name)))
+  "Create a new S3 bucket with the current name."
+  []
+  (to-map (.createBucket (s3-client) *bucket-name*)))
 
 (defn delete-bucket
-  "Delete the S3 bucket with the supplied name."
-  [cred name]
-  (.deleteBucket (s3-client cred) name))
+  "Delete the current S3 bucket."
+  []
+  (.deleteBucket (s3-client) *bucket-name*))
 
 (defn list-buckets
-  "List all the S3 buckets for the supplied credentials. The buckets will be
+  "List all the S3 buckets for the current credentials. The buckets will be
   returned as a seq of maps with the following keys:
     :name          - the bucket name
     :creation-date - the date when the bucket was created
     :owner         - the owner of the bucket"
-  [cred]
-  (map to-map (.listBuckets (s3-client cred))))
+  []
+  (map to-map (.listBuckets (s3-client))))
 
 (defprotocol ^{:no-doc true} ToPutRequest
   "A protocol for constructing a map that represents an S3 put request."
@@ -121,24 +131,24 @@
                       :server-side-encryption))))
 
 (defn- ->PutObjectRequest
-  "Create a PutObjectRequest instance from a bucket name, key and put request
+  "Create a PutObjectRequest instance from a key and put request
   map."
-  [bucket key request]
+  [key request]
   (cond
    (:file request)
-     (let [put-obj-req (PutObjectRequest. bucket key (:file request))]
+     (let [put-obj-req (PutObjectRequest. *bucket-name* key (:file request))]
        (.setMetadata put-obj-req (map->ObjectMetadata (dissoc request :file)))
        put-obj-req)
    (:input-stream request)
      (PutObjectRequest.
-      bucket key
+      *bucket-name* key
       (:input-stream request)
       (map->ObjectMetadata (dissoc request :input-stream)))))
 
 (declare create-acl) ; used by put-object
 
 (defn put-object
-  "Put a value into an S3 bucket at the specified key. The value can be
+  "Put a value at the specified key. The value can be
   a String, InputStream or File (or anything that implements the ToPutRequest
   protocol).
 
@@ -155,12 +165,12 @@
   An optional list of grant functions can be provided after metadata.
   These functions will be applied to a clear ACL and the result will be
   the ACL for the newly created object."
-  [cred bucket key value & [metadata & permissions]]
+  [key value & [metadata & permissions]]
   (let [req (->> (merge (put-request value) metadata)
-                 (->PutObjectRequest bucket key))]
+                 (->PutObjectRequest *bucket-name* key))]
     (when permissions
       (.setAccessControlList req (create-acl permissions)))
-    (.putObject (s3-client cred) req)))
+    (.putObject (s3-client) req)))
 
 (extend-protocol Mappable
   S3Object
@@ -199,17 +209,17 @@
      :key      (.getKey summary)}))
 
 (defn get-object
-  "Get an object from an S3 bucket. The object is returned as a map with the
+  "Get an object. The object is returned as a map with the
   following keys:
     :content  - an InputStream to the content
     :metadata - a map of the object's metadata
     :bucket   - the name of the bucket
     :key      - the object's key"
-  [cred bucket key]
-  (to-map (.getObject (s3-client cred) bucket key)))
+  [key]
+  (to-map (.getObject (s3-client) *bucket-name* key)))
 
 (defn get-object-metadata
-  "Get an object's metadata from a bucket. The metadata is a map with the
+  "Get an object's metadata. The metadata is a map with the
   following keys:
     :cache-control          - the CacheControl HTTP header
     :content-disposition    - the ContentDisposition HTTP header
@@ -220,8 +230,8 @@
     :etag                   - the HTTP ETag header
     :last-modified          - the last modified date
     :server-side-encryption - the server-side encryption algorithm"
-  [cred bucket key]
-  (to-map (.getObjectMetadata (s3-client cred) bucket key)))
+  [key]
+  (to-map (.getObjectMetadata (s3-client) *bucket-name* key)))
 
 (defn- map->ListObjectsRequest
   "Create a ListObjectsRequest instance from a map of values."
@@ -234,7 +244,7 @@
     (set-attr .setPrefix     (:prefix request))))
 
 (defn list-objects
-  "List the objects in an S3 bucket. A optional map of options may be supplied.
+  "List the objects. A optional map of options may be supplied.
   Available options are:
     :delimiter - read only keys up to the next delimiter (such as a '/')
     :marker    - read objects after this key
@@ -250,22 +260,22 @@
     :truncated?      - true if the list of objects was truncated
     :marker          - the marker of the listing
     :next-marker     - the next marker of the listing"
-  [cred bucket & [options]]
+  [bucket & [options]]
   (to-map
    (.listObjects
-    (s3-client cred)
+    (s3-client)
     (map->ListObjectsRequest (merge {:bucket bucket} options)))))
 
 (defn delete-object
-  "Delete an object from an S3 bucket."
-  [cred bucket key]
-  (.deleteObject (s3-client cred) bucket key))
+  "Delete an object."
+  [key]
+  (.deleteObject (s3-client) *bucket-name* key))
 
 (defn object-exists?
-  "Returns true if an object exists in the supplied bucket and key."
-  [cred bucket key]
+  "Returns true if the object with the key exists."
+  [key]
   (try
-    (get-object-metadata cred bucket key)
+    (get-object-metadata *bucket-name* key)
     true
     (catch AmazonServiceException e
       (if (= 404 (.getStatusCode e))
@@ -274,10 +284,10 @@
 
 (defn copy-object
   "Copy an existing S3 object to another key."
-  ([cred bucket src-key dest-key]
-     (copy-object cred bucket src-key bucket dest-key))
-  ([cred src-bucket src-key dest-bucket dest-key]
-     (.copyObject (s3-client cred) src-bucket src-key dest-bucket dest-key)))
+  ([src-key dest-key]
+     (copy-object *bucket-name* src-key *bucket-name* dest-key))
+  ([src-bucket src-key dest-bucket dest-key]
+     (.copyObject (s3-client) src-bucket src-key dest-bucket dest-key)))
 
 (defprotocol ^{:no-doc true} ToClojure
   "Convert an object into an idiomatic Clojure value."
@@ -317,7 +327,7 @@
      :owner  (to-map (.getOwner acl))}))
 
 (defn get-bucket-acl
-  "Get the access control list (ACL) for the supplied bucket. The ACL is a map
+  "Get the access control list (ACL) for the current bucket. The ACL is a map
   containing two keys:
     :owner  - the owner of the ACL
     :grants - a set of access permissions granted
@@ -326,14 +336,14 @@
     :grantee    - the individual or group being granted access
     :permission - the type of permission (:read, :write, :read-acp, :write-acp or
                   :full-control)."
-  [cred bucket]
-  (to-map (.getBucketAcl (s3-client cred) bucket)))
+  []
+  (to-map (.getBucketAcl (s3-client) bucket)))
 
 (defn get-object-acl
   "Get the access control list (ACL) for the supplied object. See get-bucket-acl
   for a detailed description of the return value."
-  [cred bucket key]
-  (to-map (.getObjectAcl (s3-client cred) bucket key)))
+  [key]
+  (to-map (.getObjectAcl (s3-client) *bucket-name* key)))
 
 (defn- permission [perm]
   (case perm
@@ -381,27 +391,27 @@
     (update-acl permissions)))
 
 (defn update-bucket-acl
-  "Update the access control list (ACL) for the named bucket using functions
+  "Update the access control list (ACL) for the named *bucket-name* using functions
   that update a set of grants (see get-bucket-acl).
 
   This function is often used with the grant and revoke functions, e.g.
 
-    (update-bucket-acl cred bucket
+    (update-bucket-acl bucket
       (grant :all-users :read)
       (grant {:email \"foo@example.com\"} :full-control)
       (revoke {:email \"bar@example.com\"} :write))"
-  [cred bucket & funcs]
-  (let [acl (.getBucketAcl (s3-client cred) bucket)]
+  [& funcs]
+  (let [acl (.getBucketAcl (s3-client) *bucket-name*)]
     (update-acl acl funcs)
-    (.setBucketAcl (s3-client cred) bucket acl)))
+    (.setBucketAcl (s3-client) *bucket-name* acl)))
 
 (defn update-object-acl
   "Updates the access control list (ACL) for the supplied object using functions
   that update a set of grants (see update-bucket-acl for more details)."
-  [cred bucket key & funcs]
-  (let [acl (.getObjectAcl (s3-client cred) bucket key)]
+  [key & funcs]
+  (let [acl (.getObjectAcl (s3-client) *bucket-name* key)]
     (update-acl acl funcs)
-    (.setObjectAcl (s3-client cred) bucket key acl)))
+    (.setObjectAcl (s3-client) *bucket-name* key acl)))
 
 (defn grant
   "Returns a function that adds a new grant map to a set of grants.
